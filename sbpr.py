@@ -69,10 +69,15 @@ def user_item_ranks(B, V_ui, V_iu, V_il, V_li):
     for u in range(len(B)):
         t = len(B[u])
         for i in B[u][t-1]:
-            uranks[u, i] = rank(u, t, i, B, V_ui, V_iu, V_il, V_li)
+            res = []
+            for l in B[u][t-1]:
+                res.append((u, t, i, 0, l))
+            res = np.array(res)
+            uranks[u, i] = rank(res, V_ui, V_iu, V_il, V_li)
     return uranks
 
-def rank(u, t, i, B, V_ui, V_iu, V_il, V_li):
+@jit(nopython=True, cache=True)
+def rank(boot, V_ui, V_iu, V_il, V_li):
     """ Calculates item ranks for each user at time t.
 
     This calculates the rank of item i at time t
@@ -80,14 +85,11 @@ def rank(u, t, i, B, V_ui, V_iu, V_il, V_li):
 
     Parameters
     ----------
-    u : int
-        Index of user u
-    t : int
-        Index of time t
-    i : int
-        Index of item i
-    B : list of list of list
-        Basket of items for each user u at a specific time t
+    boot : np.array
+        Contains (u, t, i, j, l) tuples
+        One instance of (u, t, i, j).  Multiple instances
+        of l.  u = user, t = time point, i = item, j=unrated item,
+        l = other items in basket.
     V_ui : np.array
         Left factor matrix for users u to items i
     V_iu : np.array
@@ -102,11 +104,13 @@ def rank(u, t, i, B, V_ui, V_iu, V_il, V_li):
     float
        The estimated rank
     """
+    u, t, i, j, l = boot[0, :]
     x = V_ui[u, :] @ V_iu[i, :].T
-    NB = len(B[u][t-1])
+    NB = len(boot)
     y = 0
-    for l in B[u][t-1]:
-        y =+ V_il[i, :] @ V_li[l, :].T
+    for k in range(NB):
+        u, t, i, j, l = boot[k]
+        y += V_il[i, :] @ V_li[l, :].T
     return x + y / NB
 
 
@@ -125,7 +129,7 @@ def bootstrap(B, I, n):
 
     Returns
     -------
-    np.array : np.float
+    list of tuple
         List of (u, t, i, j) tuples.
     """
     # construct indexes
@@ -145,25 +149,45 @@ def bootstrap(B, I, n):
             j_ = np.random.randint(0, len(I))
             j = I[j_]
         index.append((u, t, i, j))
-    return np.array(index)
+    return index
+
+def flatten(index, B):
+    """
+    Parameters
+    ----------
+    index : np.array
+       List of (u, t, i, j) tuples.
+    B : list of list of list
+        Basket of items for each user u at a specific time t
+
+    Returns
+    -------
+    iterable of np.array
+       List of (u, t, i, j, l, it) tuples.
+    """
+
+    for it in range(len(index)):
+        res = []
+        u, t, i, j = index[it]
+        for l in B[u][t]:
+            res.append((u, t, i, j, l))
+        yield np.array(res)
 
 
-def update_user_matrix(u, t, i, j, B, V_ui, V_iu, V_li, V_il,
+@jit(nopython=True, cache=True)
+def update_user_matrix(boot, V_ui, V_iu, V_li, V_il,
                        alpha, lam_ui, lam_iu):
     """ Updates the user parameters
 
+    TODO: Need to update this to accept iterable of bootstraps
+
     Parameters
     ----------
-    u : int
-        Index for user.
-    t : int
-        Time point.
-    i : int
-        Index for item i for preferred items.
-    j : int
-        Index for item j for probably not preferred items.
-    B : list of list of list
-        Basket of items for each user u at a specific time t
+    boot : np.array
+        Contains (u, t, i, j, l) tuples
+        One instance of (u, t, i, j).  Multiple instances
+        of l.  u = user, t = time point, i = item, j=unrated item,
+        l = other items in basket.
     V_ui : np.array
         Factor matrix for users u to items i
     V_iu : np.array
@@ -191,8 +215,9 @@ def update_user_matrix(u, t, i, j, B, V_ui, V_iu, V_li, V_il,
     There are side effects.  So V_ui and V_iu are modified in place
     and not actually returned.  This is done for the sake of optimization.
     """
-    ri = rank(u, t, i, B, V_ui, V_iu, V_li, V_il)
-    rj = rank(u, t, j, B, V_ui, V_iu, V_li, V_il)
+    u, t, i, j, l = boot[0]
+    ri = rank(boot, V_ui, V_iu, V_li, V_il)
+    rj = rank(boot, V_ui, V_iu, V_li, V_il)
     delta = 1 - sigmoid(ri - rj)
 
     for f in range(V_iu.shape[1]):
@@ -206,23 +231,18 @@ def update_user_matrix(u, t, i, j, B, V_ui, V_iu, V_li, V_il,
             -delta * V_ui[u, f] - lam_iu * V_iu[j, f]
         )
 
-
-def update_item_matrix(u, t, i, j, B, V_ui, V_iu, V_li, V_il,
+@jit(nopython=True, cache=True)
+def update_item_matrix(boot, V_ui, V_iu, V_li, V_il,
                        alpha, lam_il, lam_li):
     """ Updates the item parameters
 
     Parameters
     ----------
-    u : int
-        Index for user.
-    t : int
-        Time point.
-    i : int
-        Index for item i for preferred items.
-    j : int
-        Index for item j for probably not preferred items.
-    B : list of list of list
-        Triplely nested lists representing sets index by user and time
+    boot : np.array
+        Contains (u, t, i, j, l) tuples
+        One instance of (u, t, i, j).  Multiple instances
+        of l.  u = user, t = time point, i = item, j=unrated item,
+        l = other items in basket.
     V_ui : np.array
         Factor matrix for users u to items i
     V_iu : np.array
@@ -250,19 +270,33 @@ def update_item_matrix(u, t, i, j, B, V_ui, V_iu, V_li, V_il,
     There are side effects.  So V_li and V_il are modified in place
     and not actually returned.  This is done for the sake of optimization.
     """
-    ri = rank(u, t, i, B, V_ui, V_iu, V_li, V_il)
-    rj = rank(u, t, j, B, V_ui, V_iu, V_li, V_il)
+    u, t, i, j, l = boot[0]
+    ri = rank(boot, V_ui, V_iu, V_li, V_il)
+    rj = rank(boot, V_ui, V_iu, V_li, V_il)
     delta = 1 - sigmoid(ri - rj)
 
     for f in range(V_il.shape[1]):
-        NB = len(B[u][t]) # get size of the basket
-        eta = np.sum([V_li[l, f] for l in B[u][t]]) / NB
+        NB = len(boot) # get size of the basket
+        eta = 0
+        for k in range(len(boot)):
+            u, t, i, j, l = boot[k]
+            eta += V_li[l, f]
+        eta = eta / NB
 
         V_il[i, f] += alpha * (delta * eta - lam_il * V_il[i, f])
         V_il[j, f] += alpha * (-delta * eta - lam_il * V_il[j, f])
-        for l in B[u][t]:
+        for k in range(len(boot)):
+            u, t, i, j, l = boot[k]
             V_li[l, f] += alpha * (delta * (V_il[i, f] - V_il[j, f]) / NB -
                                    lam_li * V_li[l, f])
+
+
+def cost(V_ui, V_iu, V_li, V_il):
+    """
+    Calculates log (sigmoid(z_uti - z_utj))
+    """
+    pass
+
 
 # checks
 def hlu(r, B, I, alpha):
@@ -287,8 +321,9 @@ def hlu(r, B, I, alpha):
     for i in I:
         if r[i] > 0:
             score += 2**((-i - 1) / (alpha - 1))
-    NB = [2**((-i - 1) / (alpha - 1)) for i in range(len(B))]
+    NB = np.sum([2**((-i - 1) / (alpha - 1)) for i in range(len(B))])
     score = 100 * score / NB
+    return score
 
 def top_precision_recall(r, B, I, N):
     """
@@ -311,7 +346,7 @@ def top_precision_recall(r, B, I, N):
         Recall score
     """
     top = np.argsort(r)[:N]
-    hits = set([I[i] for i in top]) & B
+    hits = set([I[i] for i in top]) & set(B)
     prec = len(hits) / N
     recall = len(hits) / len(B)
     return prec, recall
@@ -340,9 +375,9 @@ def auc(r, B, I):
     for i in B:
         for j in IB:
             score += int(r[i] < r[j])
-    return score
+    return score / (NB * NIB)
 
-def score(rs, Bs, I, method='auc'):
+def score(rs, Bs, I, alpha=0.5, N=10, method='auc'):
     """ Calculates scores for all users
 
     Parameters
@@ -361,11 +396,26 @@ def score(rs, Bs, I, method='auc'):
     s : float
         Fraction of correct ranks
     """
-    s = []
-    for u in range(len(Bs)):
-        # get last timepoint
-        s.append(auc(rs[u], Bs[u][-1], I))
-    return np.mean(s)
+    if method == 'auc':
+        s = []
+        for u in range(len(Bs)):
+            # get last timepoint
+            s.append(auc(rs[u], Bs[u][-1], I))
+        return np.mean(s)
+    if method == 'hlu':
+        s = [0] * len(Bs)
+        for u in range(len(Bs)):
+            # get last timepoint
+            s[u] = hlu(rs[u], Bs[u][-1], I, alpha)
+        return np.mean(s)
+    if method == 'top_precision_recall':
+        prec, recall = [], []
+        for u in range(len(Bs)):
+            # get last timepoint
+            p, r = top_precision_recall(rs[u], Bs[u][-1], I, N)
+            prec.append(p)
+            recall.append(r)
+        return np.mean(prec), np.mean(recall)
 
 
 def softmax(x):
@@ -402,13 +452,13 @@ def simulate(kU=10, kI=11, mu=0, scale=1, lamR=15, lamI=5):
 
     B = [[] for _ in range(kU)]
     for u in range(kU):
-        num_reviews = poisson(lamR)
+        num_reviews = poisson(lamR) + 1
         # starting position
         s = randint(0, kI)
         B[u] = [[] for _ in range(num_reviews)]
         for t in range(num_reviews):
             # random walk to next basket
-            num_items = poisson(lamI)
+            num_items = poisson(lamI) + 1
             for i in range(num_items):
                 R = random()
                 # get next state
