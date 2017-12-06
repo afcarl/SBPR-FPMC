@@ -5,7 +5,7 @@ from numpy.random import poisson, randint, random
 from scipy.sparse import csr_matrix
 from sbpr import (bootstrap, update_user_matrix, update_item_matrix,
                   score, simulate, split_dataset, user_item_ranks,
-                  flatten)
+                  flatten, cost)
 import copy
 
 
@@ -135,14 +135,15 @@ class TestSBPR(unittest.TestCase):
         train, test = split_dataset(self.B)
         uranks = user_item_ranks(train, V_ui, V_iu, V_il, V_li)
         prev_auc_score = score(uranks, test, I, method='auc')
-        prev_prec_score, prev_recall_score = score(uranks, test, I,
-                                                   method='top_precision_recall')
+        prev_prec_score, prev_recall_score = score(
+            uranks, test, I,
+            method='top_precision_recall')
         prev_hlu_score = score(uranks, test, I, method='hlu')
 
         for _ in range(10):
             boots = bootstrap(train, I, 10)
             gen = flatten(boots, self.B)
-
+            c = 0
             for boot in gen:
                 update_user_matrix(boot,
                                    V_ui, V_iu, V_li, V_il,
@@ -151,6 +152,12 @@ class TestSBPR(unittest.TestCase):
                 update_item_matrix(boot,
                                    V_ui, V_iu, V_li, V_il,
                                    alpha=0.1, lam_il=0, lam_li=0)
+                c += cost(boot,
+                          V_ui, V_iu, V_li, V_il,
+                          lam_ui=0, lam_iu=0,
+                          lam_il=0, lam_li=0)
+
+            print('cost', c)
 
         # Run the metrics provided in the paper namely
         # i.e. half-life-utility

@@ -73,11 +73,11 @@ def user_item_ranks(B, V_ui, V_iu, V_il, V_li):
             for l in B[u][t-1]:
                 res.append((u, t, i, 0, l))
             res = np.array(res)
-            uranks[u, i] = rank(res, V_ui, V_iu, V_il, V_li)
+            uranks[u, i] = rank(res, False, V_ui, V_iu, V_il, V_li)
     return uranks
 
 @jit(nopython=True, cache=True)
-def rank(boot, V_ui, V_iu, V_il, V_li):
+def rank(boot, e, V_ui, V_iu, V_il, V_li):
     """ Calculates item ranks for each user at time t.
 
     This calculates the rank of item i at time t
@@ -90,6 +90,8 @@ def rank(boot, V_ui, V_iu, V_il, V_li):
         One instance of (u, t, i, j).  Multiple instances
         of l.  u = user, t = time point, i = item, j=unrated item,
         l = other items in basket.
+    e : bool
+        Indicotor if item i should be ranked, or item j
     V_ui : np.array
         Left factor matrix for users u to items i
     V_iu : np.array
@@ -105,11 +107,13 @@ def rank(boot, V_ui, V_iu, V_il, V_li):
        The estimated rank
     """
     u, t, i, j, l = boot[0, :]
+    # stupid hack to get ranks working
+    if e: i = j
     x = V_ui[u, :] @ V_iu[i, :].T
     NB = len(boot)
     y = 0
     for k in range(NB):
-        u, t, i, j, l = boot[k]
+        u, t, _, _, l = boot[k]
         y += V_il[i, :] @ V_li[l, :].T
     return x + y / NB
 
@@ -216,8 +220,8 @@ def update_user_matrix(boot, V_ui, V_iu, V_li, V_il,
     and not actually returned.  This is done for the sake of optimization.
     """
     u, t, i, j, l = boot[0]
-    ri = rank(boot, V_ui, V_iu, V_li, V_il)
-    rj = rank(boot, V_ui, V_iu, V_li, V_il)
+    ri = rank(boot, False, V_ui, V_iu, V_li, V_il)
+    rj = rank(boot, True, V_ui, V_iu, V_li, V_il)
     delta = 1 - sigmoid(ri - rj)
 
     for f in range(V_iu.shape[1]):
@@ -271,8 +275,8 @@ def update_item_matrix(boot, V_ui, V_iu, V_li, V_il,
     and not actually returned.  This is done for the sake of optimization.
     """
     u, t, i, j, l = boot[0]
-    ri = rank(boot, V_ui, V_iu, V_li, V_il)
-    rj = rank(boot, V_ui, V_iu, V_li, V_il)
+    ri = rank(boot, False, V_ui, V_iu, V_li, V_il)
+    rj = rank(boot, True, V_ui, V_iu, V_li, V_il)
     delta = 1 - sigmoid(ri - rj)
 
     for f in range(V_il.shape[1]):
@@ -291,12 +295,44 @@ def update_item_matrix(boot, V_ui, V_iu, V_li, V_il,
                                    lam_li * V_li[l, f])
 
 
-def cost(V_ui, V_iu, V_li, V_il):
+def cost(boot, V_ui, V_iu, V_li, V_il,
+         lam_ui, lam_iu, lam_il, lam_li):
     """
     Calculates log (sigmoid(z_uti - z_utj))
-    """
-    pass
 
+    Parameters
+    ----------
+    boot : np.array
+        Contains (u, t, i, j, l) tuples
+        One instance of (u, t, i, j).  Multiple instances
+        of l.  u = user, t = time point, i = item, j=unrated item,
+        l = other items in basket.
+    V_ui : np.array
+        Factor matrix for users u to items i
+    V_iu : np.array
+        Factor matrix for items i to users u
+    V_il : np.array
+        Factor matrix for items i to items l
+    V_li : np.array
+        Factor matrix for items l to items i
+    lam_iu : np.array
+        Regularization constant for V_iu factor
+    lam_ui : np.array
+        Regularization constant for V_ui factor
+    lam_il : np.array
+        Regularization constant for V_il factor
+    lam_li : np.array
+        Regularization constant for V_li factor
+
+    Return
+    ------
+    np.float
+        Cost for that particular bootstrap.
+    """
+    ri = rank(boot, False, V_ui, V_iu, V_li, V_il)
+    rj = rank(boot, True, V_ui, V_iu, V_li, V_il)
+    delta = np.log(sigmoid(ri - rj))
+    return delta
 
 # checks
 def hlu(r, B, I, alpha):
