@@ -32,12 +32,17 @@ def sigmoid(x):
     "Numerically-stable sigmoid function."
     if x >= 0:
         z = np.exp(-x)
-        return 1 / (1 + z)
+        res = 1 / (1 + z)
     else:
         # if x is less than zero then z will be small, denom can't be
         # zero because it's 1+z.
         z = np.exp(x)
-        return z / (1 + z)
+        res = z / (1 + z)
+
+    if res > 1e-100:
+        return res
+    else:
+        return 1e-100
 
 def user_item_ranks(B, V_ui, V_iu, V_il, V_li):
     """ Calculates item ranks for each user at last time point t.
@@ -108,13 +113,16 @@ def rank(boot, e, V_ui, V_iu, V_il, V_li):
     """
     u, t, i, j, l = boot[0, :]
     # stupid hack to get ranks working
-    if e: i = j
-    x = V_ui[u, :] @ V_iu[i, :].T
+    if e:
+        p = j
+    else:
+        p = i
+    x = V_ui[u, :] @ V_iu[p, :].T
     NB = len(boot)
     y = 0
     for k in range(NB):
         u, t, _, _, l = boot[k]
-        y += V_il[i, :] @ V_li[l, :].T
+        y += V_il[p, :] @ V_li[l, :].T
     return x + y / NB
 
 
@@ -222,6 +230,7 @@ def update_user_matrix(boot, V_ui, V_iu, V_li, V_il,
     u, t, i, j, l = boot[0]
     ri = rank(boot, False, V_ui, V_iu, V_li, V_il)
     rj = rank(boot, True, V_ui, V_iu, V_li, V_il)
+
     delta = 1 - sigmoid(ri - rj)
 
     for f in range(V_iu.shape[1]):
@@ -277,6 +286,7 @@ def update_item_matrix(boot, V_ui, V_iu, V_li, V_il,
     u, t, i, j, l = boot[0]
     ri = rank(boot, False, V_ui, V_iu, V_li, V_il)
     rj = rank(boot, True, V_ui, V_iu, V_li, V_il)
+
     delta = 1 - sigmoid(ri - rj)
 
     for f in range(V_il.shape[1]):
@@ -291,7 +301,7 @@ def update_item_matrix(boot, V_ui, V_iu, V_li, V_il,
         V_il[j, f] += alpha * (-delta * eta - lam_il * V_il[j, f])
         for k in range(len(boot)):
             u, t, i, j, l = boot[k]
-            V_li[l, f] += alpha * (delta * (V_il[i, f] - V_il[j, f]) / NB -
+            V_li[l, f] += alpha * ((delta * (V_il[i, f] - V_il[j, f]) / NB) -
                                    lam_li * V_li[l, f])
 
 
@@ -380,6 +390,10 @@ def top_precision_recall(r, B, I, N):
         Precision score
     recall : float
         Recall score
+
+    Note
+    ----
+    This is broken!!!
     """
     top = np.argsort(r)[:N]
     hits = set([I[i] for i in top]) & set(B)
@@ -410,7 +424,7 @@ def auc(r, B, I):
     score = 0
     for i in B:
         for j in IB:
-            score += int(r[i] < r[j])
+            score += int(r[i] > r[j])
     return score / (NB * NIB)
 
 def score(rs, Bs, I, alpha=0.5, N=10, method='auc'):

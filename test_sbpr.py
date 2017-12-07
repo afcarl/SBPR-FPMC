@@ -141,7 +141,7 @@ class TestSBPR(unittest.TestCase):
         prev_hlu_score = score(uranks, test, I, method='hlu')
 
         for _ in range(10):
-            boots = bootstrap(train, I, 10)
+            boots = bootstrap(train, I, 100)
             gen = flatten(boots, self.B)
             c = 0
             for boot in gen:
@@ -156,8 +156,6 @@ class TestSBPR(unittest.TestCase):
                           V_ui, V_iu, V_li, V_il,
                           lam_ui=0, lam_iu=0,
                           lam_il=0, lam_li=0)
-
-            print('cost', c)
 
         # Run the metrics provided in the paper namely
         # i.e. half-life-utility
