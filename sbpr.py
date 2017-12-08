@@ -163,6 +163,53 @@ def bootstrap(B, I, n):
         index.append((u, t, i, j))
     return index
 
+def fast_bootstrap(B, P, I, n):
+    """ Bootstraps (u, t, i, j, l) tuples.
+
+    Parameters
+    ----------
+    B : pd.DataFrame
+        DataFrame where column are
+        [order_id, order_number, user_id]
+        It is assumed that the order_id is the index
+    P : pd.DataFrame
+        DataFrame where columns are
+        [order_id, product_id]
+        It is assumed that the order_id is the index
+    I : set
+        Total set of items
+    n : int
+        Number of bootstraps
+
+    Returns
+    -------
+    list of tuple
+        List of (u, t, i, j, l) tuples.
+    """
+    # get top n random indexes
+    idx = np.random.choice(B.index, replace=False, size=n)
+    subB = B.loc[idx]
+    # get i for each entry
+    for oi in subB.index:
+
+        u = subB.loc[oi][0]  # user
+        t = subB.loc[oi][1]  # time
+
+        items = P.loc[oi].values
+        i_ = np.random.randint(0, len(items))
+        i = items[i_]
+        j_ = np.random.randint(0, len(I))
+        j = I[j_]
+
+        while j in set(items.ravel().tolist()):
+            j_ = np.random.randint(0, len(I))
+            j = I[j_]
+        res = []
+        # get l for each entry
+        for l in items:
+            res.append((u, t, i, j, l))
+        yield np.array(res)
+
 def flatten(index, B):
     """
     Parameters
@@ -185,13 +232,30 @@ def flatten(index, B):
             res.append((u, t, i, j, l))
         yield np.array(res)
 
+def update(X, i, j, dX, clip):
+    """ Update parameter
+
+    Parameters
+    ----------
+    X : np.array
+       Parameter to be updated
+    i : int
+       Row index
+    j : int
+       Column index
+    dX : np.array
+       Change in parameter
+    clip : float
+       Clipping threshold to prevent exploding gradients.
+    """
+
+    X[i, j] = dX
 
 @jit(nopython=True, cache=True)
-def update_user_matrix(boot, V_ui, V_iu, V_li, V_il,
+def update_user_matrix(boot, dV_ui, dV_iu,
+                       V_ui, V_iu, V_li, V_il,
                        alpha, lam_ui, lam_iu):
     """ Updates the user parameters
-
-    TODO: Need to update this to accept iterable of bootstraps
 
     Parameters
     ----------
@@ -200,6 +264,10 @@ def update_user_matrix(boot, V_ui, V_iu, V_li, V_il,
         One instance of (u, t, i, j).  Multiple instances
         of l.  u = user, t = time point, i = item, j=unrated item,
         l = other items in basket.
+    dV_ui : np.array
+        Factor update matrix for users u to items i
+    dV_iu : np.array
+        Factor update matrix for items i to users u
     V_ui : np.array
         Factor matrix for users u to items i
     V_iu : np.array
@@ -217,10 +285,10 @@ def update_user_matrix(boot, V_ui, V_iu, V_li, V_il,
 
     Returns
     -------
-    V_ui : np.array
-        Factor matrix for users u to items i (if inplace is False)
-    V_iu : np.array
-        Factor matrix for items i to users u (if inplace is False)
+    dV_ui : np.array
+        Factor update matrix for users u to items i (if inplace is False)
+    dV_iu : np.array
+        Factor update matrix for items i to users u (if inplace is False)
 
     Note
     ----
@@ -232,20 +300,20 @@ def update_user_matrix(boot, V_ui, V_iu, V_li, V_il,
     rj = rank(boot, True, V_ui, V_iu, V_li, V_il)
 
     delta = 1 - sigmoid(ri - rj)
-
     for f in range(V_iu.shape[1]):
-        V_ui[u, f] += alpha * (
+        dV_ui[u, f] += alpha * (
             delta * (V_iu[i, f] - V_iu[j, f]) - lam_ui * V_ui[u, f]
         )
-        V_iu[i, f] += alpha * (
+        dV_iu[i, f] += alpha * (
             delta * V_ui[u, f] - lam_iu * V_iu[i, f]
         )
-        V_iu[j, f] += alpha * (
+        dV_iu[j, f] += alpha * (
             -delta * V_ui[u, f] - lam_iu * V_iu[j, f]
         )
 
 @jit(nopython=True, cache=True)
-def update_item_matrix(boot, V_ui, V_iu, V_li, V_il,
+def update_item_matrix(boot, dV_li, dV_il,
+                       V_ui, V_iu, V_li, V_il,
                        alpha, lam_il, lam_li):
     """ Updates the item parameters
 
@@ -256,6 +324,10 @@ def update_item_matrix(boot, V_ui, V_iu, V_li, V_il,
         One instance of (u, t, i, j).  Multiple instances
         of l.  u = user, t = time point, i = item, j=unrated item,
         l = other items in basket.
+    dV_il : np.array
+        Factor update matrix for users u to items i
+    dV_li : np.array
+        Factor update matrix for items i to users u
     V_ui : np.array
         Factor matrix for users u to items i
     V_iu : np.array
@@ -273,10 +345,10 @@ def update_item_matrix(boot, V_ui, V_iu, V_li, V_il,
 
     Returns
     -------
-    V_li : np.array
-        Factor matrix for items l to items i
-    V_il : np.array
-        Factor matrix for items i to items l
+    dV_li : np.array
+        Factor update matrix for items l to items i
+    dV_il : np.array
+        Factor update matrix for items i to items l
 
     Note
     ----
@@ -297,11 +369,11 @@ def update_item_matrix(boot, V_ui, V_iu, V_li, V_il,
             eta += V_li[l, f]
         eta = eta / NB
 
-        V_il[i, f] += alpha * (delta * eta - lam_il * V_il[i, f])
-        V_il[j, f] += alpha * (-delta * eta - lam_il * V_il[j, f])
+        dV_il[i, f] += alpha * (delta * eta - lam_il * V_il[i, f])
+        dV_il[j, f] += alpha * (-delta * eta - lam_il * V_il[j, f])
         for k in range(len(boot)):
             u, t, i, j, l = boot[k]
-            V_li[l, f] += alpha * ((delta * (V_il[i, f] - V_il[j, f]) / NB) -
+            dV_li[l, f] += alpha * ((delta * (V_il[i, f] - V_il[j, f]) / NB) -
                                    lam_li * V_li[l, f])
 
 
@@ -424,7 +496,7 @@ def auc(r, B, I):
     score = 0
     for i in B:
         for j in IB:
-            score += int(r[i] > r[j])
+            score += int(r[i] < r[j])
     return score / (NB * NIB)
 
 def score(rs, Bs, I, alpha=0.5, N=10, method='auc'):

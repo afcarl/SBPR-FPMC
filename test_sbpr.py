@@ -1,9 +1,11 @@
 import unittest
 import numpy as np
 import numpy.testing as npt
+import pandas as pd
 from numpy.random import poisson, randint, random
 from scipy.sparse import csr_matrix
 from sbpr import (bootstrap, update_user_matrix, update_item_matrix,
+                  fast_bootstrap,
                   score, simulate, split_dataset, user_item_ranks,
                   flatten, cost)
 import copy
@@ -50,6 +52,58 @@ class TestSBPR(unittest.TestCase):
 
         npt.assert_allclose(trans_probs, exp, rtol=1e-4, atol=1e-4)
 
+    def test_fast_bootstrap(self):
+
+        A = pd.DataFrame(
+            [[2, 202279, 3],
+             [3, 205970, 16],
+             [4, 178520, 36]],
+            columns=['order_id', 'user_id', 'order_number'])
+        A = A.set_index('order_id')
+        B = pd.DataFrame(
+            [[2, 33120],
+             [2, 28985],
+             [2, 9327 ],
+             [2, 45918],
+             [2, 30035],
+             [2, 17794],
+             [2, 40141],
+             [2, 1819 ],
+             [2, 43668],
+             [3, 32665],
+             [3, 17461],
+             [3, 46667],
+             [3, 17668],
+             [3, 17704],
+             [3, 24838],
+             [3, 33754],
+             [3, 21903],
+             [4, 40285],
+             [4, 41276],
+             [4, 32645]],
+            columns=['order_id', 'product_id'])
+        B = B.set_index('order_id')
+        I = list(set(B.product_id))
+        gen = fast_bootstrap(A, B, I, 2)
+        res = next(gen)
+        exp = np.array([[178520, 36, 41276, 33120, 40285],
+                        [178520, 36, 41276, 33120, 41276],
+                        [178520, 36, 41276, 33120, 32645]])
+        npt.assert_allclose(res, exp)
+
+        res = next(gen)
+        exp = np.array(
+            [[205970, 16, 32665, 40285, 32665],
+             [205970, 16, 32665, 40285, 17461],
+             [205970, 16, 32665, 40285, 46667],
+             [205970, 16, 32665, 40285, 17668],
+             [205970, 16, 32665, 40285, 17704],
+             [205970, 16, 32665, 40285, 24838],
+             [205970, 16, 32665, 40285, 33754],
+             [205970, 16, 32665, 40285, 21903]]
+        )
+        npt.assert_allclose(res, exp)
+
     def test_bootstrap(self):
         np.random.seed(0)
         I = list(range(11))
@@ -81,6 +135,9 @@ class TestSBPR(unittest.TestCase):
         rUI = 3  # rank of UI factor
         rIL = 3  # rank of IL factor
 
+        dV_ui = np.zeros(shape=(self.kU, rUI))
+        dV_iu = np.zeros(shape=(self.kI, rUI))
+
         V_ui = np.random.normal(size=(self.kU, rUI))
         V_iu = np.random.normal(size=(self.kI, rUI))
         V_li = np.random.normal(size=(self.kI, rIL))
@@ -91,10 +148,12 @@ class TestSBPR(unittest.TestCase):
 
         update_user_matrix(
             np.array([[u, t, i, j, l]]),
+            dV_iu, dV_ui,
             V_ui, V_iu,
             V_li, V_il,
             alpha=0.1, lam_ui=0, lam_iu=0)
-
+        V_ui += dV_ui
+        V_iu += dV_iu
         self.assertFalse(np.allclose(V_ui, exp_ui))
         self.assertFalse(np.allclose(V_iu, exp_iu))
 
@@ -103,6 +162,9 @@ class TestSBPR(unittest.TestCase):
         u, t, i, j, l = 5, 0, 0, 3, 1
         rUI = 3  # rank of UI factor
         rIL = 3  # rank of IL factor
+
+        dV_li = np.zeros(shape=(self.kI, rIL))
+        dV_il = np.zeros(shape=(self.kI, rIL))
 
         V_ui = np.random.normal(size=(self.kU, rUI))
         V_iu = np.random.normal(size=(self.kI, rUI))
@@ -113,10 +175,12 @@ class TestSBPR(unittest.TestCase):
         exp_il = copy.deepcopy(V_il)
         boot = np.array([[u, t, i, j, l]], dtype=np.int64)
         update_item_matrix(
-            boot,
+            boot, dV_il, dV_li,
             V_ui, V_iu, V_li, V_il,
             alpha=0.1, lam_il=0, lam_li=0)
 
+        V_li += dV_li
+        V_il += dV_il
         self.assertFalse(np.allclose(V_li, exp_li))
         self.assertFalse(np.allclose(V_il, exp_il))
 
@@ -142,16 +206,29 @@ class TestSBPR(unittest.TestCase):
 
         for _ in range(10):
             boots = bootstrap(train, I, 100)
-            gen = flatten(boots, self.B)
+            gen = list(flatten(boots, self.B))
             c = 0
+
+            dV_ui = np.zeros(shape=(self.kU, rUI))
+            dV_iu = np.zeros(shape=(self.kI, rUI))
+            dV_li = np.zeros(shape=(self.kI, rIL))
+            dV_il = np.zeros(shape=(self.kI, rIL))
+
             for boot in gen:
-                update_user_matrix(boot,
+                update_user_matrix(boot, dV_ui, dV_iu,
                                    V_ui, V_iu, V_li, V_il,
                                    alpha=0.1, lam_ui=0, lam_iu=0)
 
-                update_item_matrix(boot,
+                update_item_matrix(boot, dV_li, dV_il,
                                    V_ui, V_iu, V_li, V_il,
                                    alpha=0.1, lam_il=0, lam_li=0)
+
+            V_ui += dV_ui
+            V_iu += dV_iu
+            V_li += dV_li
+            V_il += dV_il
+
+            for boot in gen:
                 c += cost(boot,
                           V_ui, V_iu, V_li, V_il,
                           lam_ui=0, lam_iu=0,
