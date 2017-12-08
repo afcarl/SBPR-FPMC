@@ -1,3 +1,4 @@
+import pandas as pd
 import numpy as np
 from numba import jit
 from scipy.sparse import coo_matrix, csr_matrix
@@ -43,43 +44,6 @@ def sigmoid(x):
         return res
     else:
         return 1e-100
-
-def user_item_ranks(B, V_ui, V_iu, V_il, V_li):
-    """ Calculates item ranks for each user at last time point t.
-
-    This calculates the rank of item i at time t
-    for a given user u.
-
-    Parameters
-    ----------
-    B : list of list of list
-        Basket of items for each user u at a specific time t
-    V_ui : np.array
-        Left factor matrix for users u to items i
-    V_iu : np.array
-        Right factor matrix for items i to users u
-    V_il : np.array
-        Left factor matrix for items i to items l
-    V_li : np.array
-        Right Factor matrix for items l to items i
-
-    Returns
-    -------
-    np.array
-       User by item matrix
-    """
-    kU = V_ui.shape[0]
-    kI = V_iu.shape[0]
-    uranks = np.zeros((kU, kI))
-    for u in range(len(B)):
-        t = len(B[u])
-        for i in B[u][t-1]:
-            res = []
-            for l in B[u][t-1]:
-                res.append((u, t, i, 0, l))
-            res = np.array(res)
-            uranks[u, i] = rank(res, False, V_ui, V_iu, V_il, V_li)
-    return uranks
 
 @jit(nopython=True, cache=True)
 def rank(boot, e, V_ui, V_iu, V_il, V_li):
@@ -163,93 +127,75 @@ def bootstrap(B, I, n):
         index.append((u, t, i, j))
     return index
 
-def fast_bootstrap(B, P, I, n):
+@jit(nopython=True)
+def fast_bootstrap(B, I, n):
     """ Bootstraps (u, t, i, j, l) tuples.
 
     Parameters
     ----------
-    B : pd.DataFrame
+    B : np.array
         DataFrame where column are
-        [order_id, order_number, user_id]
-        It is assumed that the order_id is the index
-    P : pd.DataFrame
-        DataFrame where columns are
-        [order_id, product_id]
-        It is assumed that the order_id is the index
-    I : set
+        [user_id, order_id, order_number, product_id]
+    I : np.array
         Total set of items
     n : int
         Number of bootstraps
+    seed : int
+        Random seed
 
     Returns
     -------
     list of tuple
         List of (u, t, i, j, l) tuples.
+
+    Note
+    ----
+    There is something weird about the random seed ...
+    So every result is random from here on out :(
     """
     # get top n random indexes
-    idx = np.random.choice(B.index, replace=False, size=n)
-    subB = B.loc[idx]
-    # get i for each entry
-    for oi in subB.index:
+    idx = np.random.choice(np.arange(len(B)), replace=False, size=n)
 
-        u = subB.loc[oi][0]  # user
-        t = subB.loc[oi][1]  # time
+    # get j for each entry
+    for oi in idx:
 
-        items = P.loc[oi].values
-        i_ = np.random.randint(0, len(items))
-        i = items[i_]
+        u = B[oi, 0]  # user id
+        o = B[oi, 1]  # order id
+        t = B[oi, 2]  # time
+        i = B[oi, 3]  # time
+
+        # find bounds of basket o
+        lo, hi = 0, 0
+        while (oi - lo) > 0:
+            u_ = B[oi - lo - 1, 0]  # user id
+            o_ = B[oi - lo - 1, 1]  # order id
+            t_ = B[oi - lo - 1, 2]  # time
+            if u_ != u or o_ !=o or t_ != t: break
+            lo += 1
+
+        while (oi + hi) < len(B) - 1:
+            u_ = B[oi + hi + 1, 0]  # user id
+            o_ = B[oi + hi + 1, 1]  # order id
+            t_ = B[oi + hi + 1, 2]  # time
+            if u_ != u or o_ !=o or t_ != t: break
+            hi += 1
+
+        items = [B[i, 3] for i in range(oi - lo, oi + hi + 1)]
+
+        # get unpreferred item
         j_ = np.random.randint(0, len(I))
         j = I[j_]
 
-        while j in set(items.ravel().tolist()):
+        while j in items:
             j_ = np.random.randint(0, len(I))
             j = I[j_]
-        res = []
+
+        res = np.zeros((len(items), 5), dtype=np.int64)
         # get l for each entry
-        for l in items:
-            res.append((u, t, i, j, l))
-        yield np.array(res)
+        for k, l in enumerate(items):
+            res[k] = np.array([u, t, i, j, l], dtype=np.int64)
+        yield res
 
-def flatten(index, B):
-    """
-    Parameters
-    ----------
-    index : np.array
-       List of (u, t, i, j) tuples.
-    B : list of list of list
-        Basket of items for each user u at a specific time t
-
-    Returns
-    -------
-    iterable of np.array
-       List of (u, t, i, j, l, it) tuples.
-    """
-
-    for it in range(len(index)):
-        res = []
-        u, t, i, j = index[it]
-        for l in B[u][t]:
-            res.append((u, t, i, j, l))
-        yield np.array(res)
-
-def update(X, i, j, dX, clip):
-    """ Update parameter
-
-    Parameters
-    ----------
-    X : np.array
-       Parameter to be updated
-    i : int
-       Row index
-    j : int
-       Column index
-    dX : np.array
-       Change in parameter
-    clip : float
-       Clipping threshold to prevent exploding gradients.
-    """
-
-    X[i, j] = dX
 
 @jit(nopython=True, cache=True)
 def update_user_matrix(boot, dV_ui, dV_iu,
@@ -416,6 +362,143 @@ def cost(boot, V_ui, V_iu, V_li, V_il,
     delta = np.log(sigmoid(ri - rj))
     return delta
 
+
+# @jit(nopython=True, cache=True)
+def user_item_ranks(B, V_ui, V_iu, V_il, V_li):
+    """ Calculates item ranks for each user at last time point t.
+
+    This calculates the rank of item i at time t
+    for a given user u.
+
+    Parameters
+    ----------
+    B : np.array
+        DataFrame where column are
+        [user_id, order_id, order_number, product_id]
+        It is assumed that only one timepoint is considered.
+        It is also assumed that all of the entries are ordered by
+        user_id and order_number.
+    V_ui : np.array
+        Left factor matrix for users u to items i
+    V_iu : np.array
+        Right factor matrix for items i to users u
+    V_il : np.array
+        Left factor matrix for items i to items l
+    V_li : np.array
+        Right Factor matrix for items l to items i
+
+    Returns
+    -------
+    np.array
+       User by item matrix
+    """
+    kU = V_ui.shape[0]
+    kI = V_iu.shape[0]
+    uranks = np.zeros((kU, kI))
+
+    res = []
+    oi = 0
+    u = B[oi, 0]  # user id
+    o = B[oi, 1]  # order id
+    t = B[oi, 2]  # time
+    i = B[oi, 3]  # item
+    o_ = B[oi, 1] # order id
+    res.append((u, t, i, 0, i))
+    for oi in range(B.shape[0]):
+        if o != o_:
+            o_ = B[oi, 1]
+            r = rank(np.array(res), False, V_ui, V_iu, V_il, V_li)
+            uranks[u, i] = r
+            u = B[oi, 0]  # user id
+            o = B[oi, 1]  # order id
+            t = B[oi, 2]  # time
+            i = B[oi, 3]  # item
+            l = B[oi, 3]  # item
+            res = []
+            res.append((u, t, i, 0, l))
+        else:
+            l = B[oi, 3]  # item
+            o = B[oi, 1]  # order id
+            res.append((u, t, i, 0, l))
+    return uranks
+
+@jit(nopython=True, cache=True)
+def _auc(r, B, I):
+    """ Calculates AUC for a single user.
+
+    Parameters
+    ----------
+    r : np.array
+        Ranks for items for a user u at time t
+    B : list
+        A basket for user u
+    I : set
+        Set of items
+
+    Parameters
+    ----------
+    score : float
+        Fraction of correct ranks
+    """
+    IB = I - set(B)
+    NIB = len(IB)
+    NB = len(B)
+    score = 0
+    for i in B:
+        for j in IB:
+            score += int(r[i] < r[j])
+    return score / (NB * NIB)
+
+def auc(R, B, I):
+    """ Calculates scores for all users
+
+    Parameters
+    ----------
+    R : np.array
+        User ranks for kU users and kI items
+    B : np.array
+        DataFrame where column are
+        [user_id, order_id, order_number, product_id]
+        This is assuming to only operate on one timepoint.
+    I : list
+        List of items
+
+    Returns
+    ----------
+    s : list, float
+        List of AUC scores
+    """
+    res = []
+    oi = 0
+    u = B[oi, 0]   # user id
+    o = B[oi, 1]   # order id
+    t = B[oi, 2]   # time
+    i = B[oi, 3]   # item
+    o_ = B[oi, 1]  # order id
+    I_ = set(I)
+    s = []
+    k = 0
+    res.append((u, t, i, 0, i))
+    for oi in range(B.shape[0]):
+        if o != o_:
+            o_ = B[oi, 1]
+            b = np.array(res, dtype=np.int64)
+            s.append( _auc(R[u, :], b[:, 3], I_) )
+
+            u = B[oi, 0]  # user id
+            o = B[oi, 1]  # order id
+            t = B[oi, 2]  # time
+            i = B[oi, 3]  # item
+            l = B[oi, 3]  # item
+            res = []
+            res.append((u, t, i, 0, l))
+            k += 1
+        else:
+            l = B[oi, 3]  # item
+            o = B[oi, 1]  # order id
+            res.append((u, t, i, 0, l))
+    return s
+
 # checks
 def hlu(r, B, I, alpha):
     """
@@ -473,73 +556,6 @@ def top_precision_recall(r, B, I, N):
     recall = len(hits) / len(B)
     return prec, recall
 
-def auc(r, B, I):
-    """ Calculates AUC for a single user.
-
-    Parameters
-    ----------
-    r : np.array
-        Ranks for items for a user u at time t
-    B : list
-        A basket for user u
-    I : list
-        List of items
-
-    Parameters
-    ----------
-    score : float
-        Fraction of correct ranks
-    """
-    IB = set(I) - set(B)
-    NIB = len(IB)
-    NB = len(B)
-    score = 0
-    for i in B:
-        for j in IB:
-            score += int(r[i] < r[j])
-    return score / (NB * NIB)
-
-def score(rs, Bs, I, alpha=0.5, N=10, method='auc'):
-    """ Calculates scores for all users
-
-    Parameters
-    ----------
-    r : np.array
-        Ranks for items for a user u at time t
-    Bs : list
-        List of baskets for each user u
-    I : list
-        List of items
-    method : str
-        Scoring method.
-
-    Parameters
-    ----------
-    s : float
-        Fraction of correct ranks
-    """
-    if method == 'auc':
-        s = []
-        for u in range(len(Bs)):
-            # get last timepoint
-            s.append(auc(rs[u], Bs[u][-1], I))
-        return np.mean(s)
-    if method == 'hlu':
-        s = [0] * len(Bs)
-        for u in range(len(Bs)):
-            # get last timepoint
-            s[u] = hlu(rs[u], Bs[u][-1], I, alpha)
-        return np.mean(s)
-    if method == 'top_precision_recall':
-        prec, recall = [], []
-        for u in range(len(Bs)):
-            # get last timepoint
-            p, r = top_precision_recall(rs[u], Bs[u][-1], I, N)
-            prec.append(p)
-            recall.append(r)
-        return np.mean(prec), np.mean(recall)
-
-
 def softmax(x):
     return np.exp(x) / np.sum(np.exp(x))
 
@@ -561,6 +577,15 @@ def simulate(kU=10, kI=11, mu=0, scale=1, lamR=15, lamI=5):
        Average number of reviews per user
     lamI : int
        Average number of items per basket
+
+    Returns
+    -------
+    trans_probs : np.array
+       Transition probabilities between any two items.
+    orders : pd.DataFrame
+       DataFrame of orders and users who have made the order,
+       along with the product ids. The column names are
+       [user_id, order_id, order_number, product_id]
     """
     kL = kI
 
@@ -572,12 +597,12 @@ def simulate(kU=10, kI=11, mu=0, scale=1, lamR=15, lamI=5):
             trans_probs[u, i, :] = softmax(np.random.normal(size=kI))
             idx_prob[u, i, :] = np.cumsum(trans_probs[u, i, :])
 
-    B = [[] for _ in range(kU)]
+    B = []
     for u in range(kU):
         num_reviews = poisson(lamR) + 1
         # starting position
         s = randint(0, kI)
-        B[u] = [[] for _ in range(num_reviews)]
+
         for t in range(num_reviews):
             # random walk to next basket
             num_items = poisson(lamI) + 1
@@ -585,38 +610,9 @@ def simulate(kU=10, kI=11, mu=0, scale=1, lamR=15, lamI=5):
                 R = random()
                 # get next state
                 s = np.searchsorted(idx_prob[u, s, :], R)
-                B[u][t] += [s]
-    return trans_probs, B
-
-
-def split_dataset(B):
-    """ Creates a training and test dataset.
-
-    The training dataset contains all baskets
-    up to the last time point for each user.
-    The test dataset contains the last basket for
-    each user.
-
-    Parameters
-    ----------
-    B : list of list of list
-        users by time by basket
-        items for a specific user at a given time.
-
-    Returns
-    -------
-    train : list of list of list
-        Training baskets
-    test : list of list
-        Test baskets
-    """
-    train = [[] for _ in range(len(B))]
-    for u in range(len(B)):
-        train[u] = B[u][:-1]
-
-    test = [[] for _ in range(len(B))]
-    for u in range(len(B)):
-        test[u] = [B[u][-1]]
-    return train, test
+                B.append((u, int('1%s%s' % (u, t)), t, s))
+    orders = pd.DataFrame(B, columns=['user_id', 'order_id',
+                                      'order_number', 'product_id'])
+    return trans_probs, orders
 
 
