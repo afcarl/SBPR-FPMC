@@ -362,11 +362,15 @@ class TestSBPRValidate(unittest.TestCase):
                   'V_li [%3.3f, %3.3f]' % (V_li.min(), V_li.max()),
                   'V_il [%3.3f, %3.3f]' % (V_il.min(), V_il.max()))
 
-        sizes = self.test.groupby(['user_id', 'product_id']).size()
-        Us = [len(sizes[i]) for i in range(len(np.unique(self.test.user_id)))]
 
-        print(self.test.values)
-        print(Us)
+
+        Us = self.test.user_id.value_counts().sort_index()
+
+        Us = np.array([
+            Us[i] if i in Us.index else 0
+            for i in range(len(np.unique(self.train.user_id)))
+        ])
+
         est = predict(V_ui, V_iu, V_il, V_li, self.test.values,
                       Us, I, N=5)
         f1 = f1_score(est, self.validate.values)

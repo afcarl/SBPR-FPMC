@@ -45,7 +45,8 @@ def sigmoid(x):
     else:
         return 1e-100
 
-@jit(nopython=True, cache=True)
+#@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=True, parallel=True)
 def rank(boot, e, V_ui, V_iu, V_il, V_li):
     """ Calculates item ranks for each user at time t.
 
@@ -195,8 +196,8 @@ def fast_bootstrap(B, I, n):
             res[k] = np.array([u, t, i, j, l], dtype=np.int64)
         yield res
 
-
-@jit(nopython=True, cache=True)
+#@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=True, parallel=True)
 def update_user_matrix(boot, dV_ui, dV_iu,
                        V_ui, V_iu, V_li, V_il,
                        alpha, lam_ui, lam_iu):
@@ -256,7 +257,8 @@ def update_user_matrix(boot, dV_ui, dV_iu,
             -delta * V_ui[u, f] - lam_iu * V_iu[j, f]
         )
 
-@jit(nopython=True, cache=True)
+#@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=True, parallel=True)
 def update_item_matrix(boot, dV_li, dV_il,
                        V_ui, V_iu, V_li, V_il,
                        alpha, lam_il, lam_li):
@@ -421,7 +423,16 @@ def user_item_ranks(B, V_ui, V_iu, V_il, V_li):
             res.append((u, t, i, 0, l))
     return uranks
 
-@jit(nopython=True, cache=True)
+#@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=True, parallel=True)
+def _calc_ranks(rs, boot, V_ui, V_iu, V_il, V_li, B, IB, N=10):
+    for i in range(len(IB)):
+        boot[:, 3] = IB[i]  # look at item i
+        r = rank(boot, True, V_ui, V_iu, V_il, V_li)
+        rs[i] = r
+
+
+#@jit(nopython=True, cache=True)
 def predict_top_ranks(boot, V_ui, V_iu, V_il, V_li, B, IB, N=10):
     """ Calculates ranks of all items for a single user.
 
@@ -455,16 +466,14 @@ def predict_top_ranks(boot, V_ui, V_iu, V_il, V_li, B, IB, N=10):
         Ranks for top N items
     """
     rs = np.zeros(len(IB))
-    for i in IB:
-        boot[:, 3] = i  # look at item i
-        r = rank(boot, True, V_ui, V_iu, V_il, V_li)
-        rs[i] = r
-    top = np.argsort(rs)[-N:]
+    _calc_ranks(rs, boot, V_ui, V_iu, V_il, V_li, B, IB, N=10)
+    top = np.argpartition(-rs, N)[:N]
+    #top = np.argsort(rs)[-N:]
     # top = np.argsort(rs)[:N]
     return top, rs[top]
 
-@jit(nopython=True, cache=True)
-def predict(V_ui, V_iu, V_il, V_li, B, I, N):
+#@jit(nopython=True, cache=True)
+def predict(V_ui, V_iu, V_il, V_li, B, Us, I, N):
     """ Predicts items for all users
 
     Parameters
@@ -481,6 +490,8 @@ def predict(V_ui, V_iu, V_il, V_li, B, I, N):
         DataFrame where column are
         [user_id, order_id, order_number, product_id]
         This is assuming to only operate on one timepoint.
+    Us : np.array
+        List of user basket sizes
     I : np.array
         List of items
     N : np.array
@@ -491,21 +502,22 @@ def predict(V_ui, V_iu, V_il, V_li, B, I, N):
     top_items : np.array
         Top N items for each user
     """
-    res = []
+
     oi = 0
     u = B[oi, 0]   # user id
     o = B[oi, 1]   # order id
     t = B[oi, 2]   # time
     i = B[oi, 3]   # item
+    l = B[oi, 3]   # item
     o_ = B[oi, 1]  # order id
     k = 0
-    top_items = np.zeros((len(np.unique(B[:, 0])), N))
-
-    res.append((u, t, i, 0, i))
-    for oi in range(B.shape[0]):
+    boot = np.zeros((Us[u], 5), dtype=np.int64)
+    boot[k] = np.array([u, t, i, 0, l], dtype=np.int64)
+    top_items = np.zeros((len(Us), N))
+    for oi in range(1, B.shape[0]):
         if o != o_:
             o_ = B[oi, 1]
-            boot = np.array(res, dtype=np.int64)
+            print(u, o, t, i, l)
             topN, R = predict_top_ranks(
                 boot, V_ui, V_iu, V_il, V_li, B, I, N)
             top_items[u] = topN
@@ -515,17 +527,17 @@ def predict(V_ui, V_iu, V_il, V_li, B, I, N):
             t = B[oi, 2]  # time
             i = B[oi, 3]  # item
             l = B[oi, 3]  # item
-            res = []
-            res.append((u, t, i, 0, l))
-            k += 1
+            # boot = []
+            k = 0
+            boot = np.zeros((Us[u], 5), dtype=np.int64)
+            boot[k] = np.array([u, t, i, 0, l], dtype=np.int64)
         else:
             l = B[oi, 3]  # item
             o = B[oi, 1]  # order id
-            res.append((u, t, i, 0, l))
-
+            boot[k] = np.array([u, t, i, 0, l], dtype=np.int64)
+        k += 1
 
     o_ = B[oi, 1]
-    boot = np.array(res, dtype=np.int64)
     topN, R = predict_top_ranks(
         boot, V_ui, V_iu, V_il, V_li, B, I, N)
     top_items[u] = topN
