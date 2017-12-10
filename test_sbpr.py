@@ -2,11 +2,12 @@ import unittest
 import numpy as np
 import pandas as pd
 import numpy.testing as npt
+from numpy.linalg import norm
 from numpy.random import poisson, randint, random
 from scipy.sparse import csr_matrix
 from sbpr import (bootstrap, update_user_matrix, update_item_matrix,
                   simulate, user_item_ranks, auc,
-                  fast_bootstrap, cost)
+                  fast_bootstrap, cost, predict, f1_score)
 import copy
 
 
@@ -38,6 +39,7 @@ class TestSBPR(unittest.TestCase):
                 return 'test'
             else:
                 return 'train'
+
         df['eval_type'] = df.apply(is_train, axis=1)
 
         self.train = df.loc[df.eval_type=='train',
@@ -154,31 +156,6 @@ class TestSBPR(unittest.TestCase):
         I = X.product_id.values
         gen = list(fast_bootstrap(X.values, I, 20))
 
-    def test_user_item_ranks(self):
-        np.random.seed(0)
-        u, t, i, j, l = 5, 0, 0, 3, 1
-        rUI = 3  # rank of UI factor
-        rIL = 3  # rank of IL factor
-        kU = 3
-        kI = 3
-        trans_probs, B = simulate(kU=kU, kI=kI,
-                                  mu=0, scale=1,
-                                  lamR=2, lamI=2)
-
-        dV_ui = np.zeros(shape=(self.kU, rUI))
-        dV_iu = np.zeros(shape=(self.kI, rUI))
-
-        V_ui = np.random.normal(size=(kU, rUI))
-        V_iu = np.random.normal(size=(kI, rUI))
-        V_li = np.random.normal(size=(kI, rIL))
-        V_il = np.random.normal(size=(kI, rIL))
-        uranks = user_item_ranks(B.values, V_ui, V_iu, V_il, V_li)
-        exp = np.array(
-            [[0., 3.01183154, 2.84390915],
-             [3.02313136, 0., 0.],
-             [0., 0., 0.]]
-        )
-        npt.assert_allclose(exp, uranks)
 
     def test_update_user_matrix_overwrite(self):
         np.random.seed(0)
@@ -237,23 +214,24 @@ class TestSBPR(unittest.TestCase):
 
     def test_all(self):
         np.random.seed(0)
-        rUI = 3  # rank of UI factor
-        rIL = 3  # rank of IL factor
+        rUI = 1  # rank of UI factor
+        rIL = 1  # rank of IL factor
 
         V_ui = np.random.normal(size=(self.kU, rUI))
         V_iu = np.random.normal(size=(self.kI, rUI))
         V_li = np.random.normal(size=(self.kI, rIL))
         V_il = np.random.normal(size=(self.kI, rIL))
 
-        I = list(range(self.kI))
+        I = np.arange(self.kI)
 
-        uranks = user_item_ranks(self.train.values,
-                                 V_ui, V_iu, V_il, V_li)
-        prev_auc_score = np.mean(auc(uranks, self.test.values, I))
-
+        prev_auc_score = np.mean(auc(V_ui, V_iu, V_il, V_li,
+                                     self.test.values, I))
+        c = 0
+        alpha = 1e-3
+        clip = 1
         for _ in range(10):
-            gen = list(fast_bootstrap(self.train.values, I, 100))
-            c = 0
+            gen = list(fast_bootstrap(self.train.values, I, 500))
+            c_ = c
 
             dV_ui = np.zeros(shape=(self.kU, rUI))
             dV_iu = np.zeros(shape=(self.kI, rUI))
@@ -263,39 +241,137 @@ class TestSBPR(unittest.TestCase):
             for boot in gen:
                 update_user_matrix(boot, dV_ui, dV_iu,
                                    V_ui, V_iu, V_li, V_il,
-                                   alpha=0.1, lam_ui=0, lam_iu=0)
+                                   alpha=alpha, lam_ui=0., lam_iu=0.)
 
                 update_item_matrix(boot, dV_li, dV_il,
                                    V_ui, V_iu, V_li, V_il,
-                                   alpha=0.1, lam_il=0, lam_li=0)
+                                   alpha=alpha, lam_il=0, lam_li=0)
 
-            V_ui += dV_ui
-            V_iu += dV_iu
-            V_li += dV_li
-            V_il += dV_il
+            V_ui += (dV_ui * clip) / norm(dV_ui)
+            V_iu += (dV_iu * clip) / norm(dV_iu)
+            V_li += (dV_li * clip) / norm(dV_li)
+            V_il += (dV_il * clip) / norm(dV_il)
 
+            c = 0
             for boot in gen:
                 c += cost(boot,
                           V_ui, V_iu, V_li, V_il,
                           lam_ui=0, lam_iu=0,
                           lam_il=0, lam_li=0)
+            print('cost %3.3f' % c,
+                  'V_ui [%3.3f, %3.3f]' % (V_ui.min(), V_ui.max()),
+                  'V_iu [%3.3f, %3.3f]' % (V_iu.min(), V_iu.max()),
+                  'V_li [%3.3f, %3.3f]' % (V_li.min(), V_li.max()),
+                  'V_il [%3.3f, %3.3f]' % (V_il.min(), V_il.max()))
 
-        # Run the metrics provided in the paper namely
-        # i.e. half-life-utility
-        #      precision and recall
-        #      AUC under the ROC curve
-        uranks = user_item_ranks(self.train.values, V_ui, V_iu, V_il, V_li)
-        post_auc_score = np.mean(auc(uranks, self.test.values, I))
+        post_auc_score = np.mean(auc(V_ui, V_iu, V_il, V_li,
+                                     self.test.values, I))
 
         self.assertGreater(post_auc_score, prev_auc_score)
 
-        # This needs troubleshooting
-        # post_prec_score, post_recall_score = score(uranks, test, I,
-        #                                            method='top_precision_recall')
-        # self.assertGreater(post_prec_score, prev_prec_score)
-        # self.assertGreater(post_recall_score, prev_recall_score)
-        # post_hlu_score = score(uranks, test, I, method='hlu')
-        # self.assertGreater(post_hlu_score, prev_hlu_score)
+
+class TestSBPRValidate(unittest.TestCase):
+    def setUp(self):
+        np.random.seed(0)
+        # generate a quasi-realistic generative model
+        # this will involve randomly generating the transition tensor
+        kU = 5
+        kI = 10
+        kL = 10
+        trans_probs, df = simulate(kU=kU, kI=kI,
+                                   mu=0, scale=1,
+                                   lamR=10, lamI=4)
+
+        self.B = df
+        self.trans_probs = trans_probs
+        self.kU = kU   # number of users
+        self.kL = kL   # number of items
+        self.kI = kI   # number of items
+
+        # setting training vs testing data
+        order_lookup = df.order_id.value_counts()
+        sizes = df.groupby(['user_id', 'order_id']).size()
+        def is_train(x):
+            if x['order_number'] == len(sizes.loc[x['user_id']]) - 2:
+                return 'test'
+            elif x['order_number'] == len(sizes.loc[x['user_id']]) - 1:
+                return 'validate'
+            else:
+                return 'train'
+
+        df['eval_type'] = df.apply(is_train, axis=1)
+
+        self.train = df.loc[df.eval_type=='train',
+                            ['user_id', 'order_id',
+                             'order_number', 'product_id']]
+        self.test = df.loc[df.eval_type=='test',
+                           ['user_id', 'order_id',
+                            'order_number', 'product_id']]
+        self.validate = df.loc[df.eval_type=='validate',
+                               ['user_id', 'order_id',
+                                'order_number', 'product_id']]
+
+
+    def test_f1_score(self):
+        np.random.seed(0)
+        rUI = 1  # rank of UI factor
+        rIL = 1  # rank of IL factor
+
+        V_ui = np.random.normal(size=(self.kU, rUI))
+        V_iu = np.random.normal(size=(self.kI, rUI))
+        V_li = np.random.normal(size=(self.kI, rIL))
+        V_il = np.random.normal(size=(self.kI, rIL))
+
+        I = np.arange(self.kI)
+
+        c = 0
+        alpha = 1e-3
+        clip = 1
+        for _ in range(10):
+            gen = list(fast_bootstrap(self.train.values, I, 100))
+            c_ = c
+
+            dV_ui = np.zeros(shape=(self.kU, rUI))
+            dV_iu = np.zeros(shape=(self.kI, rUI))
+            dV_li = np.zeros(shape=(self.kI, rIL))
+            dV_il = np.zeros(shape=(self.kI, rIL))
+
+            for boot in gen:
+                update_user_matrix(boot, dV_ui, dV_iu,
+                                   V_ui, V_iu, V_li, V_il,
+                                   alpha=alpha, lam_ui=0., lam_iu=0.)
+
+                update_item_matrix(boot, dV_li, dV_il,
+                                   V_ui, V_iu, V_li, V_il,
+                                   alpha=alpha, lam_il=0, lam_li=0)
+
+            V_ui += (dV_ui * clip) / norm(dV_ui)
+            V_iu += (dV_iu * clip) / norm(dV_iu)
+            V_li += (dV_li * clip) / norm(dV_li)
+            V_il += (dV_il * clip) / norm(dV_il)
+
+            c = 0
+            for boot in gen:
+                c += cost(boot,
+                          V_ui, V_iu, V_li, V_il,
+                          lam_ui=0, lam_iu=0,
+                          lam_il=0, lam_li=0)
+            print('cost %3.3f' % c,
+                  'V_ui [%3.3f, %3.3f]' % (V_ui.min(), V_ui.max()),
+                  'V_iu [%3.3f, %3.3f]' % (V_iu.min(), V_iu.max()),
+                  'V_li [%3.3f, %3.3f]' % (V_li.min(), V_li.max()),
+                  'V_il [%3.3f, %3.3f]' % (V_il.min(), V_il.max()))
+
+        sizes = self.test.groupby(['user_id', 'product_id']).size()
+        Us = [len(sizes[i]) for i in range(len(np.unique(self.test.user_id)))]
+
+        print(self.test.values)
+        print(Us)
+        est = predict(V_ui, V_iu, V_il, V_li, self.test.values,
+                      Us, I, N=5)
+        f1 = f1_score(est, self.validate.values)
+
+        self.assertGreater(np.mean(f1), 0.05)
 
 
 if __name__=="__main__":

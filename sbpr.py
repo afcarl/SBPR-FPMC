@@ -87,7 +87,7 @@ def rank(boot, e, V_ui, V_iu, V_il, V_li):
     for k in range(NB):
         u, t, _, _, l = boot[k]
         y += V_il[p, :] @ V_li[l, :].T
-    return x + y / NB
+    return (x + y / NB)
 
 
 def bootstrap(B, I, n):
@@ -185,7 +185,6 @@ def fast_bootstrap(B, I, n):
         # get unpreferred item
         j_ = np.random.randint(0, len(I))
         j = I[j_]
-
         while j in items:
             j_ = np.random.randint(0, len(I))
             j = I[j_]
@@ -423,44 +422,254 @@ def user_item_ranks(B, V_ui, V_iu, V_il, V_li):
     return uranks
 
 @jit(nopython=True, cache=True)
-def _auc(r, B, I):
+def predict_top_ranks(boot, V_ui, V_iu, V_il, V_li, B, IB, N=10):
+    """ Calculates ranks of all items for a single user.
+
+    Parameters
+    ----------
+    boot : np.array
+        Contains (u, t, i, j, l) tuples
+        One instance of (u, t, i, j).  Multiple instances
+        of l.  u = user, t = time point, i = item, j=unrated item,
+        l = other items in basket.
+    V_ui : np.array
+        Left factor matrix for users u to items i
+    V_iu : np.array
+        Right factor matrix for items i to users u
+    V_il : np.array
+        Left factor matrix for items i to items l
+    V_li : np.array
+        Right Factor matrix for items l to items i
+    B : np.array
+        A basket for user u
+    IB : np.array
+        Set all items.
+    N : int
+        Number of top items.
+
+    Returns
+    -------
+    top : np.array
+        Top N items
+    top_ranks : np.array
+        Ranks for top N items
+    """
+    rs = np.zeros(len(IB))
+    for i in IB:
+        boot[:, 3] = i  # look at item i
+        r = rank(boot, True, V_ui, V_iu, V_il, V_li)
+        rs[i] = r
+    top = np.argsort(rs)[-N:]
+    # top = np.argsort(rs)[:N]
+    return top, rs[top]
+
+@jit(nopython=True, cache=True)
+def predict(V_ui, V_iu, V_il, V_li, B, I, N):
+    """ Predicts items for all users
+
+    Parameters
+    ----------
+    V_ui : np.array
+        Left factor matrix for users u to items i
+    V_iu : np.array
+        Right factor matrix for items i to users u
+    V_il : np.array
+        Left factor matrix for items i to items l
+    V_li : np.array
+        Right Factor matrix for items l to items i
+    B : np.array
+        DataFrame where column are
+        [user_id, order_id, order_number, product_id]
+        This is assuming to only operate on one timepoint.
+    I : np.array
+        List of items
+    N : np.array
+        Number of top items.
+
+    Returns
+    -------
+    top_items : np.array
+        Top N items for each user
+    """
+    res = []
+    oi = 0
+    u = B[oi, 0]   # user id
+    o = B[oi, 1]   # order id
+    t = B[oi, 2]   # time
+    i = B[oi, 3]   # item
+    o_ = B[oi, 1]  # order id
+    k = 0
+    top_items = np.zeros((len(np.unique(B[:, 0])), N))
+
+    res.append((u, t, i, 0, i))
+    for oi in range(B.shape[0]):
+        if o != o_:
+            o_ = B[oi, 1]
+            boot = np.array(res, dtype=np.int64)
+            topN, R = predict_top_ranks(
+                boot, V_ui, V_iu, V_il, V_li, B, I, N)
+            top_items[u] = topN
+
+            u = B[oi, 0]  # user id
+            o = B[oi, 1]  # order id
+            t = B[oi, 2]  # time
+            i = B[oi, 3]  # item
+            l = B[oi, 3]  # item
+            res = []
+            res.append((u, t, i, 0, l))
+            k += 1
+        else:
+            l = B[oi, 3]  # item
+            o = B[oi, 1]  # order id
+            res.append((u, t, i, 0, l))
+
+
+    o_ = B[oi, 1]
+    boot = np.array(res, dtype=np.int64)
+    topN, R = predict_top_ranks(
+        boot, V_ui, V_iu, V_il, V_li, B, I, N)
+    top_items[u] = topN
+    return top_items
+
+def precision_recall_score(est, obs):
+    """ Precision/Recall scores for a single user
+
+    est : np.array
+        Estimated items
+    obs : np.array
+        Observed items
+
+    Return
+    ------
+    prec : float
+        Precision score
+    recall : float
+        recall score
+    """
+    TP = np.intersect1d(est, obs)
+    FP = np.setdiff1d(est, obs)
+
+    prec = len(TP) / (len(TP) + len(FP))
+    recall = len(TP) / len(np.unique(obs))
+    return prec, recall
+
+def f1_score(est, obs):
+    """ Computer F1 score
+
+    Parameters
+    ----------
+    est : np.array
+        Estimated items
+    obs : np.array
+        DataFrame where column are
+        [user_id, order_id, order_number, product_id]
+        This is assuming to only operate on one timepoint.
+
+    Returns
+    -------
+    f1 : np.array
+        F1 scores for each user.
+    """
+    res = []
+    oi = 0
+    u = obs[oi, 0]   # user id
+    o = obs[oi, 1]   # order id
+    t = obs[oi, 2]   # time
+    i = obs[oi, 3]   # item
+    o_ = obs[oi, 1]  # order id
+    res.append((u, t, i, 0, i))
+    prec = []
+    rec = []
+    for oi in range(obs.shape[0]):
+        if o != o_:
+            o_ = obs[oi, 1]
+            boot = np.array(res, dtype=np.int64)
+            obs_items = boot[:, 4]
+            est_items = est[u, :]
+            p, r = precision_recall_score(est_items, obs_items)
+            prec.append(p)
+            rec.append(r)
+
+            u = obs[oi, 0]  # user id
+            o = obs[oi, 1]  # order id
+            t = obs[oi, 2]  # time
+            i = obs[oi, 3]  # item
+            l = obs[oi, 3]  # item
+            res = []
+            res.append((u, t, i, 0, l))
+        else:
+            l = obs[oi, 3]  # item
+            o = obs[oi, 1]  # order id
+            res.append((u, t, i, 0, l))
+
+    o_ = obs[oi, 1]
+    boot = np.array(res, dtype=np.int64)
+    obs_items = boot[:, 3]
+    est_items = est[u, :]
+    p, r = precision_recall_score(est, obs_items)
+    prec.append(p)
+    rec.append(r)
+
+    p, r = np.mean(p), np.mean(r)
+
+    f1 = p * r / (p + r)
+
+    return f1
+
+@jit(nopython=True, cache=True)
+def _auc(boot, V_ui, V_iu, V_il, V_li, B, IB):
     """ Calculates AUC for a single user.
 
     Parameters
     ----------
-    r : np.array
-        Ranks for items for a user u at time t
-    B : list
+    V_ui : np.array
+        Left factor matrix for users u to items i
+    V_iu : np.array
+        Right factor matrix for items i to users u
+    V_il : np.array
+        Left factor matrix for items i to items l
+    V_li : np.array
+        Right Factor matrix for items l to items i
+    B : np.array
         A basket for user u
-    I : set
-        Set of items
+    IB : np.array
+        Set of items outside of basket
 
     Parameters
     ----------
     score : float
         Fraction of correct ranks
     """
-    IB = I - set(B)
     NIB = len(IB)
     NB = len(B)
     score = 0
-    for i in B:
-        for j in IB:
-            score += int(r[i] < r[j])
+    for j in IB:
+        boot[:, 3] = j
+        for _ in B:
+            ri = rank(boot, False, V_ui, V_iu, V_il, V_li)
+            rj = rank(boot, True, V_ui, V_iu, V_il, V_li)
+            score += int(ri < rj)
     return score / (NB * NIB)
 
-def auc(R, B, I):
+
+def auc(V_ui, V_iu, V_il, V_li, B, I):
     """ Calculates scores for all users
 
     Parameters
     ----------
-    R : np.array
-        User ranks for kU users and kI items
+    V_ui : np.array
+        Left factor matrix for users u to items i
+    V_iu : np.array
+        Right factor matrix for items i to users u
+    V_il : np.array
+        Left factor matrix for items i to items l
+    V_li : np.array
+        Right Factor matrix for items l to items i
     B : np.array
         DataFrame where column are
         [user_id, order_id, order_number, product_id]
         This is assuming to only operate on one timepoint.
-    I : list
+    I : np.array
         List of items
 
     Returns
@@ -482,8 +691,11 @@ def auc(R, B, I):
     for oi in range(B.shape[0]):
         if o != o_:
             o_ = B[oi, 1]
-            b = np.array(res, dtype=np.int64)
-            s.append( _auc(R[u, :], b[:, 3], I_) )
+            boot = np.array(res, dtype=np.int64)
+            b = np.sort(np.unique(boot[:, 3]))
+            IB = np.setdiff1d(I, b, assume_unique=True)
+            s_ = _auc(boot, V_ui, V_iu, V_il, V_li, b, IB)
+            s.append( s_ )
 
             u = B[oi, 0]  # user id
             o = B[oi, 1]  # order id
