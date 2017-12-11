@@ -423,8 +423,8 @@ def user_item_ranks(B, V_ui, V_iu, V_il, V_li):
             res.append((u, t, i, 0, l))
     return uranks
 
-#@jit(nopython=True, cache=True)
-@jit(nopython=True, cache=True, parallel=True)
+#@jit(nopython=True, parallel=True)
+@jit(nopython=True, cache=True)
 def _calc_ranks(rs, boot, V_ui, V_iu, V_il, V_li, B, IB, N=10):
     for i in range(len(IB)):
         boot[:, 3] = IB[i]  # look at item i
@@ -432,7 +432,7 @@ def _calc_ranks(rs, boot, V_ui, V_iu, V_il, V_li, B, IB, N=10):
         rs[i] = r
 
 
-#@jit(nopython=True, cache=True)
+#@jit(nopython=True)
 def predict_top_ranks(boot, V_ui, V_iu, V_il, V_li, B, IB, N=10):
     """ Calculates ranks of all items for a single user.
 
@@ -472,8 +472,7 @@ def predict_top_ranks(boot, V_ui, V_iu, V_il, V_li, B, IB, N=10):
     # top = np.argsort(rs)[:N]
     return top, rs[top]
 
-#@jit(nopython=True, cache=True)
-def predict(V_ui, V_iu, V_il, V_li, B, Us, I, N):
+def predict(V_ui, V_iu, V_il, V_li, B, Us, I, N, subsize):
     """ Predicts items for all users
 
     Parameters
@@ -496,13 +495,15 @@ def predict(V_ui, V_iu, V_il, V_li, B, Us, I, N):
         List of items
     N : np.array
         Number of top items.
+    subsize : np.array
+        Subsampling size of items.  This is a heuristic so that
+        we don't evaluate every item.
 
     Returns
     -------
     top_items : np.array
         Top N items for each user
     """
-
     oi = 0
     u = B[oi, 0]   # user id
     o = B[oi, 1]   # order id
@@ -511,59 +512,49 @@ def predict(V_ui, V_iu, V_il, V_li, B, Us, I, N):
     l = B[oi, 3]   # item
     o_ = B[oi, 1]  # order id
     k = 0
+    res = []
     boot = np.zeros((Us[u], 5), dtype=np.int64)
     boot[k] = np.array([u, t, i, 0, l], dtype=np.int64)
     top_items = np.zeros((len(Us), N))
     for oi in range(1, B.shape[0]):
         if o != o_:
             o_ = B[oi, 1]
-            print(u, o, t, i, l)
-            topN, R = predict_top_ranks(
-                boot, V_ui, V_iu, V_il, V_li, B, I, N)
-            top_items[u] = topN
+            boot = np.array(res, dtype=np.int64)
 
+            if subsize is not None:
+                # throw in stupid heuristic to speed this up
+                I_ = np.random.choice(I, size=subsize, replace=False)
+                # throw in items from last basket
+                I_[:len(boot)] = boot[:, 4]
+            else:
+                I_ = I
+
+            topN, R = predict_top_ranks(
+                boot, V_ui, V_iu, V_il, V_li, B, I_, N)
+            top_items[u] = topN
             u = B[oi, 0]  # user id
             o = B[oi, 1]  # order id
             t = B[oi, 2]  # time
             i = B[oi, 3]  # item
             l = B[oi, 3]  # item
-            # boot = []
             k = 0
-            boot = np.zeros((Us[u], 5), dtype=np.int64)
-            boot[k] = np.array([u, t, i, 0, l], dtype=np.int64)
+            #boot = np.zeros((Us[u], 5), dtype=np.int64)
+            #boot[k] = np.array([u, t, i, 0, l], dtype=np.int64)
+            res = []
+            res.append((u, t, i, 0, l))
         else:
             l = B[oi, 3]  # item
             o = B[oi, 1]  # order id
-            boot[k] = np.array([u, t, i, 0, l], dtype=np.int64)
-        k += 1
+            #boot[k] = np.array([u, t, i, 0, l], dtype=np.int64)
+            res.append((u, t, i, 0, l))
+        #k += 1
 
     o_ = B[oi, 1]
+    boot = np.array(res, dtype=np.int64)
     topN, R = predict_top_ranks(
         boot, V_ui, V_iu, V_il, V_li, B, I, N)
     top_items[u] = topN
     return top_items
-
-def precision_recall_score(est, obs):
-    """ Precision/Recall scores for a single user
-
-    est : np.array
-        Estimated items
-    obs : np.array
-        Observed items
-
-    Return
-    ------
-    prec : float
-        Precision score
-    recall : float
-        recall score
-    """
-    TP = np.intersect1d(est, obs)
-    FP = np.setdiff1d(est, obs)
-
-    prec = len(TP) / (len(TP) + len(FP))
-    recall = len(TP) / len(np.unique(obs))
-    return prec, recall
 
 def f1_score(est, obs):
     """ Computer F1 score
@@ -597,8 +588,13 @@ def f1_score(est, obs):
             o_ = obs[oi, 1]
             boot = np.array(res, dtype=np.int64)
             obs_items = boot[:, 4]
-            est_items = est[u, :]
-            p, r = precision_recall_score(est_items, obs_items)
+            est_items = np.array(est[u, :], dtype=np.int64)
+            E = set(est_items.flatten())
+            O = set(obs_items.flatten())
+            TP = E & O
+            FP = E - O
+            p = len(TP) / (len(TP) + len(FP))
+            r = len(TP) / len(O)
             prec.append(p)
             rec.append(r)
 
@@ -616,17 +612,23 @@ def f1_score(est, obs):
 
     o_ = obs[oi, 1]
     boot = np.array(res, dtype=np.int64)
-    obs_items = boot[:, 3]
-    est_items = est[u, :]
-    p, r = precision_recall_score(est, obs_items)
+    obs_items = boot[:, 4]
+    est_items = np.array(est[u, :], dtype=np.int64)
+
+    E = set(est_items.flatten())
+    O = set(obs_items.flatten())
+    TP = E & O
+    FP = E - O
+    p = len(TP) / (len(TP) + len(FP))
+    r = len(TP) / len(O)
     prec.append(p)
     rec.append(r)
+    p_, r_ = np.mean(prec), np.mean(rec)
 
-    p, r = np.mean(p), np.mean(r)
-
-    f1 = p * r / (p + r)
+    f1 = p_ * r_ / (p_ + r_)
 
     return f1
+
 
 @jit(nopython=True, cache=True)
 def _auc(boot, V_ui, V_iu, V_il, V_li, B, IB):

@@ -372,7 +372,7 @@ class TestSBPRValidate(unittest.TestCase):
         ])
 
         est = predict(V_ui, V_iu, V_il, V_li, self.test.values,
-                      Us, I, N=5)
+                      Us, I, N=5, subsize=10)
         f1 = f1_score(est, self.validate.values)
 
         self.assertGreater(np.mean(f1), 0.05)
